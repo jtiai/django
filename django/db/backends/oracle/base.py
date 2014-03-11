@@ -87,6 +87,9 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     supports_tablespaces = True
     supports_sequence_reset = False
 
+class OracleDateTimeAdapter(datetime.datetime):
+    input_size = cx_Oracle.TIMESTAMP
+
 class DatabaseOperations(BaseDatabaseOperations):
     compiler_module = "django.db.backends.oracle.compiler"
 
@@ -358,19 +361,44 @@ WHEN (new.%(col_name)s IS NULL)
         else:
             return "TABLESPACE %s" % self.quote_name(tablespace)
 
-    def value_to_db_datetime(self, value):
+    def value_to_db_date(self, value):
+        """
+        Transform a date value to an object compatible with what is expected
+        by the backend driver for date columns.
+        """
         if value is None:
             return None
-
-        # Oracle doesn't support tz-aware datetimes
-        if timezone.is_aware(value):
-            if settings.USE_TZ:
-                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+	
+    def value_to_db_datetime(self, value):
+        """
+        Transform a datetime value to an object compatible with what is expected
+        by the backend driver for datetime columns.
+        
+        If naive datetime is passed assumes that is in UTC. Normally Django 
+        models.DateTimeField makes sure that if USE_TZ is True passed datetime
+        is timezone aware. 
+        """
+        
+        if value is None:
+            return None
+        
+        if settings.USE_TZ:
+            if timezone.is_aware(value):
+                value = value.astimezone(timezone.utc)
             else:
-                raise ValueError("Oracle backend does not support timezone-aware datetimes when USE_TZ is False.")
-
-        return six.text_type(value)
-
+                # Assume that naive datetime is actually in UTC,
+                value = value.replace(tzinfo=timezone.utc)
+        elif timezone.is_aware(value):
+            raise ValueError("Oracle backend does not support timezone-aware datetimes when USE_TZ is False.")
+                    
+        
+        value = OracleDateTimeAdapter(value.year, value.month, value.day,
+                               value.hour, value.minute, value.second,
+                               value.microsecond, value.tzinfo)
+        
+        return value
+	
     def value_to_db_time(self, value):
         if value is None:
             return None
@@ -386,9 +414,10 @@ WHEN (new.%(col_name)s IS NULL)
                                  value.second, value.microsecond)
 
     def year_lookup_bounds_for_date_field(self, value):
-        first = '%s-01-01'
-        second = '%s-12-31'
-        return [first % value, second % value]
+        # Create bounds as real date values
+        first = datetime.date(value, 1, 1)
+        last = datetime.date(value, 12, 31)
+        return [first, last]
 
     def combine_expression(self, connector, sub_expressions):
         "Oracle requires special cases for %% and & operators in query expressions"
